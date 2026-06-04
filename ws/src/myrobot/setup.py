@@ -35,6 +35,7 @@ setup(
             "hanoi_planner = myrobot.0_hanoi_planner:main",
             # "hanoi_spawn_objects = myrobot.0_hanoi_spawn_objects:main",
             "hanoi_spawnandvoice = myrobot.hanoi_spawnandvoice:main",
+            "hanoi_spawnandvoice2 = myrobot.hanoi_spawnandvoice2:main",
         ],
     },
 )

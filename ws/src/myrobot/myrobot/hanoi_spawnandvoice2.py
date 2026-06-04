@@ -44,7 +44,6 @@ HANOI_TOWER_NAMES = tuple(f"tower{index}" for index in range(1, NUM_DISKS + 1))
 
 """Box geometry and position"""
 BOX_SIZE = (0.1, 0.001, 0.1)
-# 這裡定義好左、右障礙物的座標 (以 y 軸正負來區分左右)
 BOX_POSITIONS = {
     "left": (0.25, 0.075, 0.05),   # y = 0.075 偏向站點 0 (左)
     "right": (0.25, -0.075, 0.05), # y = -0.075 偏向站點 2 (右)
@@ -62,7 +61,6 @@ for mesh in MESH_FILE_PATH.values():
 MESH_SCALE = (0.00095, 0.00095, 0.00095)
 
 # ==================== GPT 提示詞設定 ====================
-# 修改 Prompt，讓 GPT 輸出 target_station 與 obstacles 兩個欄位
 SYSTEM_PROMPT = """You are a helpful ROS 2 assistant for Hanoi Tower robot arm.
 Given a user voice request, your job is to extract:
 1. The target station index (0, 1, or 2) where the whole tower should move to.
@@ -132,11 +130,9 @@ class MoveGroupPythonInterface(Node):
         self.attached_collision_object_publisher = self.create_publisher(AttachedCollisionObject, "/attached_collision_object", 10)
         self.hanoi_station_client = self.create_client(SetHanoiTowerStations, "/set_hanoi_tower_stations")
 
-        # 初始化語音識別器
         self.recognizer = sr.Recognizer()
         self.recognizer.dynamic_energy_threshold = True
         
-        # 初始化 Azure AI Client (GitHub Models)
         token = os.environ.get("GITHUB_TOKEN", "")
         if not token:
             raise RuntimeError("環境變數 GITHUB_TOKEN 未設定。請先 export GITHUB_TOKEN=your_token")
@@ -145,12 +141,34 @@ class MoveGroupPythonInterface(Node):
             endpoint="https://models.github.ai/inference",
             credential=AzureKeyCredential(token),
         )
-        self.model = "gpt-4o" # 使用標準名稱
+        self.model = "gpt-4o"
 
         time.sleep(1.0)
 
     def wait_for_state_update(self) -> None:
         self._executor.spin_once(timeout_sec=0.1)
+
+    # 新增：自動清除指定 ID 物件的功能
+    def remove_object(self, object_name: str) -> None:
+        collision_object = CollisionObject(
+            header=Header(frame_id=self.PLANNING_FRAME, stamp=self.get_clock().now().to_msg()),
+            id=object_name,
+            operation=CollisionObject.REMOVE,
+        )
+        self.collision_object_publisher.publish(collision_object)
+        self.wait_for_state_update()
+
+    # 新增：一鍵清理所有可能的舊障礙物與河內塔物件
+    def clear_all_environment_objects(self) -> None:
+        self.get_logger().info("🧹 正在清理舊的環境物件與障礙物...")
+        # 清除河內塔
+        for tower_name in HANOI_TOWER_NAMES:
+            self.remove_object(tower_name)
+        # 清除障礙物
+        self.remove_object("box_left")
+        self.remove_object("box_right")
+        # 額外確保等待環境同步
+        time.sleep(0.5)
 
     def add_box(self, *, box_name: str, box_pose: Pose, size: tuple[float, float, float]) -> None:
         box = SolidPrimitive(type=SolidPrimitive.BOX, dimensions=size)
@@ -172,7 +190,6 @@ class MoveGroupPythonInterface(Node):
         self.get_logger().info(f"Added mesh: {mesh_name}")
         self.wait_for_state_update()
 
-    # 修改：同時獲取目標站點與障礙物模式
     def get_target_and_obstacles_via_voice(self) -> tuple[int, str]:
         mic = sr.Microphone()
 
@@ -196,7 +213,6 @@ class MoveGroupPythonInterface(Node):
                 gpt_reply = response.choices[0].message.content.strip()
                 print(f"🤖 GPT 回應: {gpt_reply}")
 
-                # 解析 JSON 拿到目標站點與障礙物設定
                 data = json.loads(gpt_reply)
                 target_station = int(data["target_station"])
                 obstacle_mode = str(data["obstacles"]).lower()
@@ -257,13 +273,19 @@ def main(args=None):
         path_plan_object = MoveGroupPythonInterface(executor)
         executor.add_node(path_plan_object)
 
-        # 2. 為了符合邏輯順序，先用語音取得「最終目標」與「障礙物模式」
+        # 【核心修改 1】在做任何事之前，先清除上一輪殘留的物件，確保環境乾淨，此時 RViz 什麼障礙物都沒有
+        path_plan_object.clear_all_environment_objects()
+
+        # 2. 語音輸入階段：此時 RViz 還不會顯示任何障礙物
         print("\n=== Step 2: 語音設定最終目標與障礙物 ===")
         target_station, obstacle_mode = path_plan_object.get_target_and_obstacles_via_voice()
         print(f" 🎯 成功取得目標！全塔將移動至站點: {target_station}")
         print(f" 🚧 障礙物模式設定為: {obstacle_mode}")
 
-        # 3. 在 RViz 中生成河內塔物體
+        # 【核心修改 2】語音輸入完畢後，才「同時」生成河內塔與選定的障礙物
+        print("\n=== Step 3: 依據語音指令生成環境物件 ===")
+        
+        # 生成河內塔物體
         stacks = build_stacks_from_tower_stations(tower_stations)
         tower_spacing = Tower_height - Tower_overlap
         for station_index, stack in enumerate(stacks):
@@ -277,7 +299,7 @@ def main(args=None):
                     file_path=MESH_FILE_PATH[tower_name], scale=MESH_SCALE,
                 )
 
-        # 4. 根據語音識別結果，動態生成 Box 障礙物
+        # 動態生成障礙物 Box
         if obstacle_mode in ["left", "both"]:
             x, y, z = BOX_POSITIONS["left"]
             path_plan_object.add_box(
@@ -297,7 +319,7 @@ def main(args=None):
         if obstacle_mode == "none":
             print(" 🚫 語音指示不產生任何障礙物。")
 
-        # 5. 發送服務給手臂 Planner 開始動作
+        # 3. 發送服務給手臂 Planner 開始動作
         path_plan_object.send_hanoi_station_request(tower_stations, target_station)
 
         print("\n任務已發送！手臂規劃中...")
