@@ -1,7 +1,0 @@
-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
-
-export GITHUB_TOKEN="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"
-cd ~/ros2_ws
-source install/setup.bash
-ros2 launch voicegpt lab2.launch.py
-
